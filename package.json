@@ -1,0 +1,17 @@
+{
+  "name": "safe-route-keeper",
+  "version": "1.0.0",
+  "description": "Linux 下通过独立 Chrome 配置自动恢复 SafeRoute 强制门户网络认证",
+  "type": "module",
+  "scripts": {
+    "check": "node --check keeper.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azel-ko/safe-route-keeper.git"
+  },
+  "license": "MIT"
+}
