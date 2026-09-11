@@ -1,15 +1,15 @@
 [Unit]
-Description=SafeRoute browser auto re-login keeper
-After=graphical-session.target network-online.target
+Description=SafeRoute direct HTTP auto-login keeper
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 ExecStart="@NODE_BIN@" "@PROJECT_DIR@/keeper.mjs" run
 Restart=always
-RestartSec=5
+RestartSec=60
 Environment=SAFE_ROUTE_INTERVAL_MS=60000
-PassEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+Environment=SAFE_ROUTE_CREDENTIALS_FILE=@CREDENTIALS_FILE@
 
 [Install]
 WantedBy=default.target

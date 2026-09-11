@@ -12,4 +12,4 @@ fi
 systemctl --user daemon-reload
 
 echo "已卸载 safe-route-keeper 用户服务。"
-echo "独立 Chrome 配置仍然保留在 ~/.local/state/safe-route-keeper/。"
+echo "凭据文件不会被自动删除。"

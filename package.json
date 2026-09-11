@@ -1,10 +1,11 @@
 {
   "name": "safe-route-keeper",
-  "version": "1.0.0",
-  "description": "Linux 下通过独立 Chrome 配置自动恢复 SafeRoute 强制门户网络认证",
+  "version": "2.0.0",
+  "description": "Linux 下直接调用认证接口自动恢复 SafeRoute 强制门户网络认证",
   "type": "module",
   "scripts": {
-    "check": "node --check keeper.mjs"
+    "check": "node --check keeper.mjs && node --check keeper.test.mjs",
+    "test": "node --test keeper.test.mjs"
   },
   "engines": {
     "node": ">=22"
