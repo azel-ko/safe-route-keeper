@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SafeRouteKeeper, parseLoginPage } from "./keeper.mjs";
+import {
+  deriveLoginRequest,
+  SafeRouteKeeper,
+  parseLoginPage,
+} from "./keeper.mjs";
 
 const authOrigin = "http://192.168.120.254";
 const portalUrl = `${authOrigin}/login?id=39&url=http%3A%2F%2Fprobe&user=10.0.0.8&mac=00:11:22:33:44:55`;
@@ -9,10 +13,10 @@ const portalHtml = `
   <form>
     <input name="param[UserName]" value="">
     <input name="param[UserPswd]" value="">
-    <input value="id=39&amp;url=http%3A%2F%2Fprobe&amp;user=10.0.0.8&amp;mac=00:11:22:33:44:55" name="uri">
+    <input value="id=39&amp;url=http://probe&amp;user=10.0.0.8&amp;mac=00:11:22:33:44:55" name="uri">
     <input value="0" name="force">
   </form>
-  <script>var url ="http://192.168.120.254/user-login-auth?id=39&url=x&user=y&mac=z";</script>
+  <script>var url ="http://192.168.120.254/user-login-auth?id=39&url=http%3A%2F%2Fprobe&user=10.0.0.8&mac=00:11:22:33:44:55";</script>
 `;
 
 function config(overrides = {}) {
@@ -32,6 +36,20 @@ test("parses the SafeRoute endpoint and hidden uri", () => {
   const parsed = parseLoginPage(portalHtml, portalUrl, authOrigin);
   assert.equal(parsed.endpoint.pathname, "/user-login-auth");
   assert.match(parsed.uri, /^id=39&url=/);
+});
+
+test("derives the login request from captive-portal redirect parameters", () => {
+  const parsed = parseLoginPage(portalHtml, portalUrl, authOrigin);
+  const derived = deriveLoginRequest(portalUrl, authOrigin);
+  assert.equal(derived.endpoint.origin, parsed.endpoint.origin);
+  assert.equal(derived.endpoint.pathname, parsed.endpoint.pathname);
+  for (const name of ["id", "url", "user", "mac"]) {
+    assert.equal(
+      derived.endpoint.searchParams.get(name),
+      parsed.endpoint.searchParams.get(name),
+    );
+  }
+  assert.equal(derived.uri, parsed.uri);
 });
 
 test("does nothing while the probe returns 204", async () => {
@@ -78,6 +96,28 @@ test("posts credentials and verifies connectivity after a portal redirect", asyn
   assert.equal(post.options.body.get("param[UserPswd]"), "demo-pass");
   assert.equal(post.options.body.get("force"), "0");
   assert.match(post.options.body.get("uri"), /^id=39&url=/);
+});
+
+test("falls back to redirect parameters when the fetched page has no login script", async () => {
+  let submittedBody;
+  const messages = [];
+  const keeper = new SafeRouteKeeper({
+    config: config(),
+    environment: { HRD_USERNAME: "demo-user", HRD_PASSWD: "demo-pass" },
+    logger: (message) => messages.push(message),
+    fetchImpl: async (url, options = {}) => {
+      if (String(url) === portalUrl) {
+        return new Response("<html>temporary gateway page</html>", { status: 200 });
+      }
+      submittedBody = options.body;
+      return Response.json({ status: "1" });
+    },
+  });
+
+  await keeper.login(portalUrl);
+  assert.equal(submittedBody.get("param[UserName]"), "demo-user");
+  assert.equal(submittedBody.get("force"), "0");
+  assert.match(messages.join("\n"), /网关跳转参数/);
 });
 
 test("does not force another session offline by default", async () => {

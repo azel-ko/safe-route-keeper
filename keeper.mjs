@@ -91,6 +91,32 @@ export function parseLoginPage(html, pageUrl, expectedAuthOrigin) {
   return { endpoint, uri };
 }
 
+export function deriveLoginRequest(portalUrl, expectedAuthOrigin) {
+  const portal = new URL(portalUrl);
+  const expectedOrigin = new URL(expectedAuthOrigin).origin;
+  if (portal.origin !== expectedOrigin) {
+    throw new Error("认证页面不属于预期的认证服务器");
+  }
+
+  const parameterNames = ["id", "url", "user", "mac"];
+  if (!parameterNames.every((name) => portal.searchParams.has(name))) {
+    throw new Error("认证地址缺少动态登录参数");
+  }
+
+  const parameters = parameterNames.map((name) => [
+    name,
+    portal.searchParams.get(name) ?? "",
+  ]);
+  if (parameters.some(([name, value]) => name !== "id" && value === "")) {
+    throw new Error("认证地址包含空的动态登录参数");
+  }
+
+  const endpoint = new URL("/user-login-auth", expectedOrigin);
+  for (const [name, value] of parameters) endpoint.searchParams.set(name, value);
+  const uri = parameters.map(([name, value]) => `${name}=${value}`).join("&");
+  return { endpoint, uri };
+}
+
 function parseCredentialFile(content) {
   const values = {};
   for (const line of content.split(/\r?\n/)) {
@@ -267,11 +293,22 @@ export class SafeRouteKeeper {
       cookie = cookiesFrom(response);
     }
 
-    const { endpoint, uri } = parseLoginPage(
-      html,
-      pageUrl,
-      this.config.authOrigin,
-    );
+    let request;
+    try {
+      request = parseLoginPage(html, pageUrl, this.config.authOrigin);
+      const uriParameters = new URLSearchParams(request.uri);
+      if (!["url", "user", "mac"].every((name) => uriParameters.get(name))) {
+        throw new Error("认证页面缺少动态登录参数");
+      }
+    } catch (pageError) {
+      try {
+        request = deriveLoginRequest(portalUrl, this.config.authOrigin);
+        this.log("认证页面结构异常，已改用网关跳转参数构造登录请求");
+      } catch {
+        throw pageError;
+      }
+    }
+    const { endpoint, uri } = request;
 
     const submit = async (force) => {
       const body = new URLSearchParams({
