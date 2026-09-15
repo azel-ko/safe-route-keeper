@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { readFile, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_PROBE_URL = "http://connectivitycheck.gstatic.com/generate_204";
-const DEFAULT_FALLBACK_PROBE_URL = "http://223.5.5.5/";
+const DEFAULT_FALLBACK_PROBE_IPS = ["142.251.127.94", "142.250.154.94"];
 const DEFAULT_AUTH_ORIGIN = "http://192.168.120.254";
 const LEGACY_CREDENTIALS_FILE = "/etc/profile.d/huierdun.sh";
 
@@ -19,6 +19,12 @@ function positiveInteger(value, fallback) {
 function booleanValue(value, fallback = false) {
   if (value === undefined) return fallback;
   return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+}
+
+function commaSeparatedValues(value, fallback) {
+  if (value === undefined) return fallback;
+  const values = value.split(",").map((item) => item.trim()).filter(Boolean);
+  return values.length > 0 ? values : fallback;
 }
 
 function timestamp() {
@@ -174,13 +180,19 @@ export async function loadCredentials(config, environment = process.env) {
 
 export function createConfig(environment = process.env) {
   const legacyHost = environment.SAFE_ROUTE_AUTH_HOST;
+  const stateRoot = environment.XDG_STATE_HOME ??
+    path.join(os.homedir(), ".local", "state");
   return {
     probeUrl: environment.SAFE_ROUTE_PROBE_URL ?? DEFAULT_PROBE_URL,
-    fallbackProbeUrl: environment.SAFE_ROUTE_FALLBACK_PROBE_URL ??
-      DEFAULT_FALLBACK_PROBE_URL,
+    fallbackProbeIps: commaSeparatedValues(
+      environment.SAFE_ROUTE_FALLBACK_PROBE_IPS,
+      DEFAULT_FALLBACK_PROBE_IPS,
+    ),
     authOrigin: environment.SAFE_ROUTE_AUTH_ORIGIN ??
       (legacyHost ? `http://${legacyHost}` : DEFAULT_AUTH_ORIGIN),
     credentialsFile: environment.SAFE_ROUTE_CREDENTIALS_FILE,
+    portalCacheFile: environment.SAFE_ROUTE_PORTAL_CACHE_FILE ??
+      path.join(stateRoot, "safe-route-keeper", "portal-url"),
     intervalMs: positiveInteger(environment.SAFE_ROUTE_INTERVAL_MS, 30_000),
     maxBackoffMs: positiveInteger(environment.SAFE_ROUTE_MAX_BACKOFF_MS, 60_000),
     requestTimeoutMs: positiveInteger(environment.SAFE_ROUTE_TIMEOUT_MS, 10_000),
@@ -200,6 +212,30 @@ function isExpectedPortal(url, authOrigin) {
 function fetchFailureReason(error) {
   const detail = error.cause?.code ?? error.cause?.message;
   return detail ? `${error.message} (${detail})` : error.message;
+}
+
+function probeAttempts(config) {
+  const primary = new URL(config.probeUrl);
+  const attempts = [{
+    url: primary.toString(),
+    fallback: false,
+    headers: { "User-Agent": "safe-route-keeper/2" },
+  }];
+  for (const address of config.fallbackProbeIps ?? []) {
+    const url = new URL(primary);
+    url.protocol = "http:";
+    url.hostname = address;
+    url.port = "";
+    attempts.push({
+      url: url.toString(),
+      fallback: true,
+      headers: {
+        Host: primary.host,
+        "User-Agent": "safe-route-keeper/2",
+      },
+    });
+  }
+  return attempts;
 }
 
 function cookiesFrom(response) {
@@ -235,12 +271,7 @@ export class SafeRouteKeeper {
   }
 
   async probe() {
-    const attempts = [
-      { url: this.config.probeUrl, fallback: false },
-      { url: this.config.fallbackProbeUrl, fallback: true },
-    ].filter((attempt, index, all) =>
-      attempt.url && all.findIndex((item) => item.url === attempt.url) === index
-    );
+    const attempts = probeAttempts(this.config);
     const failures = [];
 
     for (const attempt of attempts) {
@@ -252,7 +283,7 @@ export class SafeRouteKeeper {
           {
             redirect: "manual",
             cache: "no-store",
-            headers: { "User-Agent": "safe-route-keeper/2" },
+            headers: attempt.headers,
           },
           this.config.requestTimeoutMs,
         );
@@ -264,13 +295,16 @@ export class SafeRouteKeeper {
       }
 
       if (response.status === 204) {
-        return { online: true, probe: attempt.fallback ? "备用探测" : "HTTP 204" };
+        if (!attempt.fallback) return { online: true, probe: "HTTP 204" };
+        failures.push("DNS 旁路可达，但不能证明域名网络已经认证");
+        continue;
       }
 
       const location = response.headers.get("location");
       if (location) {
         const portalUrl = new URL(location, attempt.url).toString();
         if (isExpectedPortal(portalUrl, this.config.authOrigin)) {
+          await this.rememberPortalUrl(portalUrl);
           return { online: false, portalUrl };
         }
       }
@@ -286,16 +320,56 @@ export class SafeRouteKeeper {
         }
       }
 
-      if (attempt.fallback) {
-        return { online: true, probe: `备用 IP（HTTP ${response.status}）` };
-      }
-      failures.push(`主探测返回 HTTP ${response.status}`);
+      failures.push(
+        `${attempt.fallback ? "DNS 旁路" : "主"}探测返回 HTTP ${response.status}`,
+      );
+    }
+
+    const cachedPortalUrl = await this.cachedPortalUrl();
+    if (cachedPortalUrl) {
+      return {
+        online: false,
+        portalUrl: cachedPortalUrl,
+        cachedPortal: true,
+        reason: failures.join("；"),
+      };
     }
 
     return {
       online: false,
       reason: failures.join("；") || "公网探测失败",
     };
+  }
+
+  async cachedPortalUrl() {
+    if (!this.config.portalCacheFile) return undefined;
+    try {
+      const portalUrl = (await readFile(this.config.portalCacheFile, "utf8")).trim();
+      deriveLoginRequest(portalUrl, this.config.authOrigin);
+      return portalUrl;
+    } catch (error) {
+      if (error.code === "ENOENT") return undefined;
+      this.log(`忽略无效的认证参数缓存：${error.message}`);
+      return undefined;
+    }
+  }
+
+  async rememberPortalUrl(portalUrl) {
+    if (!this.config.portalCacheFile) return;
+    try {
+      deriveLoginRequest(portalUrl, this.config.authOrigin);
+      await mkdir(path.dirname(this.config.portalCacheFile), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(this.config.portalCacheFile, `${portalUrl}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      await chmod(this.config.portalCacheFile, 0o600);
+    } catch (error) {
+      this.log(`保存认证参数失败：${error.message}`);
+    }
   }
 
   async login(portalUrl, suppliedHtml) {
@@ -391,7 +465,9 @@ export class SafeRouteKeeper {
     }
     if (!state.portalUrl) throw new Error(state.reason);
 
-    this.log("检测到认证失效，正在直接调用登录接口");
+    this.log(state.cachedPortal
+      ? "域名探测失败，正在使用已保存的认证参数恢复登录"
+      : "检测到认证失效，正在直接调用登录接口");
     await this.login(state.portalUrl, state.portalHtml);
     await this.wait(this.config.verifyDelayMs);
 

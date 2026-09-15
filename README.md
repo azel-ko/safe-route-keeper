@@ -14,11 +14,11 @@ SafeRoute Keeper 是一个面向 Linux 的轻量级网络认证守护程序。�
 ## 工作原理
 
 1. 默认每 30 秒请求一次 Google HTTP 204 探测地址。
-2. 域名探测连接失败时，立即请求不依赖 DNS 的备用公网 IP。
-3. 任一探测被强制门户重定向时，只接受来自指定认证服务器的地址。
+2. 每次发现认证重定向时，以权限 `600` 保存网关给出的动态认证参数。
+3. 域名探测因 Mihomo Fake-IP 连接失败时，使用已保存参数重复登录。
 4. 读取认证页面中的动态 `uri` 和 `/user-login-auth` 接口。
 5. 使用 `HRD_USERNAME`、`HRD_PASSWD` 提交表单。
-6. 接口成功后等待 3 秒，再次确认公网可访问。
+6. 接口成功后等待 3 秒，仍以原域名 HTTP 204 作为成功标准，避免被公网 IP 白名单误导。
 
 程序不会绕过验证码、多因素认证或管理员限制。账号已在其他设备登录时，默认不会把另一台设备强制下线；只有设置 `HRD_FORCE_LOGIN=1` 才会强制登录。
 
@@ -134,7 +134,8 @@ journalctl --user -u safe-route-keeper.service -f
 | `SAFE_ROUTE_TIMEOUT_MS` | `10000` | 单次 HTTP 请求超时，毫秒 |
 | `SAFE_ROUTE_VERIFY_DELAY_MS` | `3000` | 登录后的复检等待时间，毫秒 |
 | `SAFE_ROUTE_PROBE_URL` | Google 204 地址 | 公网连通性检测地址 |
-| `SAFE_ROUTE_FALLBACK_PROBE_URL` | `http://223.5.5.5/` | 不依赖 DNS 的备用探测地址 |
+| `SAFE_ROUTE_FALLBACK_PROBE_IPS` | 两个 Google IPv4 | DNS 旁路探测地址，逗号分隔 |
+| `SAFE_ROUTE_PORTAL_CACHE_FILE` | `~/.local/state/.../portal-url` | 动态认证参数缓存文件 |
 | `SAFE_ROUTE_AUTH_ORIGIN` | `http://192.168.120.254` | 认证服务器来源 |
 
 修改 systemd 配置后执行：

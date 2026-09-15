@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -22,7 +25,7 @@ const portalHtml = `
 function config(overrides = {}) {
   return {
     probeUrl: "http://probe.test/generate_204",
-    fallbackProbeUrl: "http://223.5.5.5/",
+    fallbackProbeIps: ["203.0.113.10"],
     authOrigin,
     intervalMs: 60_000,
     maxBackoffMs: 60_000,
@@ -67,25 +70,55 @@ test("does nothing while the probe returns 204", async () => {
   assert.equal(calls, 1);
 });
 
-test("uses a DNS-independent probe when the primary probe cannot connect", async () => {
+test("does not confuse DNS-bypass reachability with authenticated Internet", async () => {
   const requested = [];
   const keeper = new SafeRouteKeeper({
     config: config(),
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, options = {}) => {
       requested.push(String(url));
       if (String(url) === config().probeUrl) {
         const error = new TypeError("fetch failed");
         error.cause = { code: "EAI_AGAIN" };
         throw error;
       }
-      return new Response(null, { status: 404 });
+      assert.equal(options.headers.Host, "probe.test");
+      return new Response(null, { status: 204 });
     },
     logger: () => {},
   });
   const result = await keeper.probe();
-  assert.equal(result.online, true);
-  assert.match(result.probe, /备用 IP/);
-  assert.deepEqual(requested, [config().probeUrl, config().fallbackProbeUrl]);
+  assert.equal(result.online, false);
+  assert.match(result.reason, /不能证明域名网络已经认证/);
+  assert.deepEqual(requested, [
+    config().probeUrl,
+    "http://203.0.113.10/generate_204",
+  ]);
+});
+
+test("uses cached portal parameters when Fake-IP DNS breaks the primary probe", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "safe-route-keeper-"));
+  const portalCacheFile = path.join(directory, "portal-url");
+  await writeFile(portalCacheFile, `${portalUrl}\n`, { mode: 0o600 });
+  try {
+    const keeper = new SafeRouteKeeper({
+      config: config({ portalCacheFile }),
+      fetchImpl: async (url) => {
+        if (String(url) === config().probeUrl) {
+          const error = new TypeError("fetch failed");
+          error.cause = { code: "EAI_AGAIN" };
+          throw error;
+        }
+        return new Response(null, { status: 204 });
+      },
+      logger: () => {},
+    });
+    const result = await keeper.probe();
+    assert.equal(result.online, false);
+    assert.equal(result.cachedPortal, true);
+    assert.equal(result.portalUrl, portalUrl);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("detects the captive portal through the DNS-independent probe", async () => {
