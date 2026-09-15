@@ -297,7 +297,7 @@ export class SafeRouteKeeper {
       if (response.status === 204) {
         if (!attempt.fallback) return { online: true, probe: "HTTP 204" };
         failures.push("DNS 旁路可达，但不能证明域名网络已经认证");
-        continue;
+        break;
       }
 
       const location = response.headers.get("location");
