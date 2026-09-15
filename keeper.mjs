@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_PROBE_URL = "http://connectivitycheck.gstatic.com/generate_204";
+const DEFAULT_FALLBACK_PROBE_URL = "http://223.5.5.5/";
 const DEFAULT_AUTH_ORIGIN = "http://192.168.120.254";
 const LEGACY_CREDENTIALS_FILE = "/etc/profile.d/huierdun.sh";
 
@@ -175,11 +176,13 @@ export function createConfig(environment = process.env) {
   const legacyHost = environment.SAFE_ROUTE_AUTH_HOST;
   return {
     probeUrl: environment.SAFE_ROUTE_PROBE_URL ?? DEFAULT_PROBE_URL,
+    fallbackProbeUrl: environment.SAFE_ROUTE_FALLBACK_PROBE_URL ??
+      DEFAULT_FALLBACK_PROBE_URL,
     authOrigin: environment.SAFE_ROUTE_AUTH_ORIGIN ??
       (legacyHost ? `http://${legacyHost}` : DEFAULT_AUTH_ORIGIN),
     credentialsFile: environment.SAFE_ROUTE_CREDENTIALS_FILE,
-    intervalMs: positiveInteger(environment.SAFE_ROUTE_INTERVAL_MS, 60_000),
-    maxBackoffMs: positiveInteger(environment.SAFE_ROUTE_MAX_BACKOFF_MS, 600_000),
+    intervalMs: positiveInteger(environment.SAFE_ROUTE_INTERVAL_MS, 30_000),
+    maxBackoffMs: positiveInteger(environment.SAFE_ROUTE_MAX_BACKOFF_MS, 60_000),
     requestTimeoutMs: positiveInteger(environment.SAFE_ROUTE_TIMEOUT_MS, 10_000),
     verifyDelayMs: positiveInteger(environment.SAFE_ROUTE_VERIFY_DELAY_MS, 3_000),
     forceLogin: booleanValue(environment.HRD_FORCE_LOGIN),
@@ -192,6 +195,11 @@ function isExpectedPortal(url, authOrigin) {
   } catch {
     return false;
   }
+}
+
+function fetchFailureReason(error) {
+  const detail = error.cause?.code ?? error.cause?.message;
+  return detail ? `${error.message} (${detail})` : error.message;
 }
 
 function cookiesFrom(response) {
@@ -227,46 +235,66 @@ export class SafeRouteKeeper {
   }
 
   async probe() {
-    let response;
-    try {
-      response = await fetchWithTimeout(
-        this.fetchImpl,
-        this.config.probeUrl,
-        {
-          redirect: "manual",
-          cache: "no-store",
-          headers: { "User-Agent": "safe-route-keeper/2" },
-        },
-        this.config.requestTimeoutMs,
-      );
-    } catch (error) {
-      return { online: false, reason: `公网探测失败：${error.message}` };
-    }
+    const attempts = [
+      { url: this.config.probeUrl, fallback: false },
+      { url: this.config.fallbackProbeUrl, fallback: true },
+    ].filter((attempt, index, all) =>
+      attempt.url && all.findIndex((item) => item.url === attempt.url) === index
+    );
+    const failures = [];
 
-    if (response.status === 204) return { online: true };
-
-    const location = response.headers.get("location");
-    if (location) {
-      const portalUrl = new URL(location, this.config.probeUrl).toString();
-      if (isExpectedPortal(portalUrl, this.config.authOrigin)) {
-        return { online: false, portalUrl };
+    for (const attempt of attempts) {
+      let response;
+      try {
+        response = await fetchWithTimeout(
+          this.fetchImpl,
+          attempt.url,
+          {
+            redirect: "manual",
+            cache: "no-store",
+            headers: { "User-Agent": "safe-route-keeper/2" },
+          },
+          this.config.requestTimeoutMs,
+        );
+      } catch (error) {
+        failures.push(
+          `${attempt.fallback ? "备用" : "主"}探测失败：${fetchFailureReason(error)}`,
+        );
+        continue;
       }
-    }
 
-    if (response.status === 200) {
-      const html = await response.text();
-      if (html.includes("/user-login-auth")) {
-        return {
-          online: false,
-          portalUrl: `${this.config.authOrigin}/login`,
-          portalHtml: html,
-        };
+      if (response.status === 204) {
+        return { online: true, probe: attempt.fallback ? "备用探测" : "HTTP 204" };
       }
+
+      const location = response.headers.get("location");
+      if (location) {
+        const portalUrl = new URL(location, attempt.url).toString();
+        if (isExpectedPortal(portalUrl, this.config.authOrigin)) {
+          return { online: false, portalUrl };
+        }
+      }
+
+      if (response.status === 200) {
+        const html = await response.text();
+        if (html.includes("/user-login-auth")) {
+          return {
+            online: false,
+            portalUrl: `${this.config.authOrigin}/login`,
+            portalHtml: html,
+          };
+        }
+      }
+
+      if (attempt.fallback) {
+        return { online: true, probe: `备用 IP（HTTP ${response.status}）` };
+      }
+      failures.push(`主探测返回 HTTP ${response.status}`);
     }
 
     return {
       online: false,
-      reason: `公网探测返回 HTTP ${response.status}，但没有认证门户地址`,
+      reason: failures.join("；") || "公网探测失败",
     };
   }
 
@@ -358,7 +386,7 @@ export class SafeRouteKeeper {
   async checkAndRepair({ quietOnline = true } = {}) {
     const state = await this.probe();
     if (state.online) {
-      if (!quietOnline) this.log("网络在线（HTTP 204）");
+      if (!quietOnline) this.log(`网络在线（${state.probe ?? "探测通过"}）`);
       return "online";
     }
     if (!state.portalUrl) throw new Error(state.reason);
@@ -435,7 +463,7 @@ async function runForever(keeper) {
     if (stopping) break;
     const backoff = Math.min(
       keeper.config.maxBackoffMs,
-      keeper.config.intervalMs * (2 ** Math.min(failures, 4)),
+      keeper.config.intervalMs * (2 ** Math.min(Math.max(failures - 1, 0), 4)),
     );
     await interruptibleDelay(backoff);
   }

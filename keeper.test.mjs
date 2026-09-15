@@ -22,9 +22,10 @@ const portalHtml = `
 function config(overrides = {}) {
   return {
     probeUrl: "http://probe.test/generate_204",
+    fallbackProbeUrl: "http://223.5.5.5/",
     authOrigin,
     intervalMs: 60_000,
-    maxBackoffMs: 600_000,
+    maxBackoffMs: 60_000,
     requestTimeoutMs: 1_000,
     verifyDelayMs: 1,
     forceLogin: false,
@@ -64,6 +65,60 @@ test("does nothing while the probe returns 204", async () => {
   });
   assert.equal(await keeper.checkAndRepair(), "online");
   assert.equal(calls, 1);
+});
+
+test("uses a DNS-independent probe when the primary probe cannot connect", async () => {
+  const requested = [];
+  const keeper = new SafeRouteKeeper({
+    config: config(),
+    fetchImpl: async (url) => {
+      requested.push(String(url));
+      if (String(url) === config().probeUrl) {
+        const error = new TypeError("fetch failed");
+        error.cause = { code: "EAI_AGAIN" };
+        throw error;
+      }
+      return new Response(null, { status: 404 });
+    },
+    logger: () => {},
+  });
+  const result = await keeper.probe();
+  assert.equal(result.online, true);
+  assert.match(result.probe, /备用 IP/);
+  assert.deepEqual(requested, [config().probeUrl, config().fallbackProbeUrl]);
+});
+
+test("detects the captive portal through the DNS-independent probe", async () => {
+  const keeper = new SafeRouteKeeper({
+    config: config(),
+    fetchImpl: async (url) => {
+      if (String(url) === config().probeUrl) throw new TypeError("fetch failed");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: portalUrl },
+      });
+    },
+    logger: () => {},
+  });
+  const result = await keeper.probe();
+  assert.equal(result.online, false);
+  assert.equal(result.portalUrl, portalUrl);
+});
+
+test("reports causes from both probes when neither can connect", async () => {
+  const keeper = new SafeRouteKeeper({
+    config: config(),
+    fetchImpl: async (url) => {
+      const error = new TypeError("fetch failed");
+      error.cause = { code: String(url) === config().probeUrl ? "EAI_AGAIN" : "EHOSTUNREACH" };
+      throw error;
+    },
+    logger: () => {},
+  });
+  const result = await keeper.probe();
+  assert.equal(result.online, false);
+  assert.match(result.reason, /主探测失败.*EAI_AGAIN/);
+  assert.match(result.reason, /备用探测失败.*EHOSTUNREACH/);
 });
 
 test("posts credentials and verifies connectivity after a portal redirect", async () => {

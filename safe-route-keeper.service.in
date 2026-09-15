@@ -8,7 +8,8 @@ Type=simple
 ExecStart="@NODE_BIN@" "@PROJECT_DIR@/keeper.mjs" run
 Restart=always
 RestartSec=60
-Environment=SAFE_ROUTE_INTERVAL_MS=60000
+Environment=SAFE_ROUTE_INTERVAL_MS=30000
+Environment=SAFE_ROUTE_MAX_BACKOFF_MS=60000
 Environment=SAFE_ROUTE_CREDENTIALS_FILE=@CREDENTIALS_FILE@
 
 [Install]

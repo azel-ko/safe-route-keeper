@@ -13,12 +13,12 @@ SafeRoute Keeper 是一个面向 Linux 的轻量级网络认证守护程序。�
 
 ## 工作原理
 
-1. 默认每 60 秒请求一次 Google HTTP 204 探测地址。
-2. 收到 HTTP 204 时判定网络正常，不执行登录。
-3. 被强制门户重定向时，只接受来自指定认证服务器的地址。
+1. 默认每 30 秒请求一次 Google HTTP 204 探测地址。
+2. 域名探测连接失败时，立即请求不依赖 DNS 的备用公网 IP。
+3. 任一探测被强制门户重定向时，只接受来自指定认证服务器的地址。
 4. 读取认证页面中的动态 `uri` 和 `/user-login-auth` 接口。
 5. 使用 `HRD_USERNAME`、`HRD_PASSWD` 提交表单。
-6. 接口成功后等待 3 秒，再次确认公网返回 HTTP 204。
+6. 接口成功后等待 3 秒，再次确认公网可访问。
 
 程序不会绕过验证码、多因素认证或管理员限制。账号已在其他设备登录时，默认不会把另一台设备强制下线；只有设置 `HRD_FORCE_LOGIN=1` 才会强制登录。
 
@@ -129,11 +129,12 @@ journalctl --user -u safe-route-keeper.service -f
 | `HRD_PASSWD` | 无 | 登录密码 |
 | `HRD_FORCE_LOGIN` | `0` | 是否允许强制顶掉其他在线设备 |
 | `SAFE_ROUTE_CREDENTIALS_FILE` | 自动选择 | 凭据文件路径 |
-| `SAFE_ROUTE_INTERVAL_MS` | `60000` | 正常检测间隔，毫秒 |
-| `SAFE_ROUTE_MAX_BACKOFF_MS` | `600000` | 故障退避上限，毫秒 |
+| `SAFE_ROUTE_INTERVAL_MS` | `30000` | 正常检测间隔，毫秒 |
+| `SAFE_ROUTE_MAX_BACKOFF_MS` | `60000` | 故障退避上限，毫秒 |
 | `SAFE_ROUTE_TIMEOUT_MS` | `10000` | 单次 HTTP 请求超时，毫秒 |
 | `SAFE_ROUTE_VERIFY_DELAY_MS` | `3000` | 登录后的复检等待时间，毫秒 |
 | `SAFE_ROUTE_PROBE_URL` | Google 204 地址 | 公网连通性检测地址 |
+| `SAFE_ROUTE_FALLBACK_PROBE_URL` | `http://223.5.5.5/` | 不依赖 DNS 的备用探测地址 |
 | `SAFE_ROUTE_AUTH_ORIGIN` | `http://192.168.120.254` | 认证服务器来源 |
 
 修改 systemd 配置后执行：
